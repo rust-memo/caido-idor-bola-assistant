@@ -74,6 +74,35 @@ describe("IDOR candidate detector", () => {
     expect(result?.score).toBeGreaterThanOrEqual(75);
   });
 
+  it("does not claim correlation when only the field name matches", () => {
+    const parameters = parseRequestParameters("user_id=12345", "", "", []);
+    const result = analyzeMessage(
+      message({
+        path: "/api/profile",
+        query: "user_id=12345",
+        parameters,
+        responseBody: '{"user_id":98765,"name":"Another object"}',
+      }),
+      settings,
+    );
+    expect(result?.reasons).not.toContain(
+      "request reference correlated with response",
+    );
+  });
+
+  it("keeps candidate fingerprints independent from authentication context", () => {
+    const plain = analyzeMessage(message(), settings);
+    const withIdentityHeader = analyzeMessage(
+      message({ headers: { "X-User-Id": ["99"] } }),
+      settings,
+    );
+    expect(withIdentityHeader?.fingerprint).toBe(plain?.fingerprint);
+    expect(
+      withIdentityHeader?.references.find((value) => value.location === "PATH")
+        ?.evidence,
+    ).toContain("known resource path segment");
+  });
+
   it("suppresses a lone generic ID without resource context", () => {
     const parameters = parseRequestParameters("id=opaque123456", "", "", []);
     const result = analyzeMessage(

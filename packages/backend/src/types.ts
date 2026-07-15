@@ -156,6 +156,8 @@ export type MessageDetails = {
   requestId: string;
   request: string;
   response: string;
+  requestTruncated: boolean;
+  responseTruncated: boolean;
 };
 
 export type CaptureProfileInput = {

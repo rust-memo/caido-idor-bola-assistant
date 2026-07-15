@@ -17,6 +17,11 @@ export type EvidenceResult = {
   authenticationFailure: boolean;
 };
 
+export type OwnerControlBarrier = {
+  detail: string;
+  authenticationFailure: boolean;
+};
+
 const DENIED =
   /\b(unauthori[sz]ed|forbidden|access denied|permission denied|not allowed|login required)\b/i;
 const SESSION =
@@ -25,6 +30,57 @@ const LOGIN =
   /<form[^>]+(?:login|signin)|name=["']?(?:password|passwd)|\/login|sign[ -]?in/i;
 const WAF =
   /\b(web application firewall|cloudflare|akamai|imperva|request blocked|security policy)\b/i;
+
+export function classifyOwnerControl(
+  response: ResponseSample,
+): OwnerControlBarrier | undefined {
+  if (response.status === 429)
+    return {
+      detail:
+        "Owner control was rate limited; cross-identity request was not sent",
+      authenticationFailure: false,
+    };
+  if (SESSION.test(response.body))
+    return {
+      detail:
+        "Owner control indicates a CSRF, token, or session failure; cross-identity request was not sent",
+      authenticationFailure: true,
+    };
+  if (LOGIN.test(response.body))
+    return {
+      detail:
+        "Owner control received a login page; cross-identity request was not sent",
+      authenticationFailure: true,
+    };
+  if (WAF.test(response.body))
+    return {
+      detail:
+        "A WAF or security gateway handled the owner control; cross-identity request was not sent",
+      authenticationFailure: false,
+    };
+  if (
+    response.status === 401 ||
+    response.status === 403 ||
+    DENIED.test(response.body)
+  )
+    return {
+      detail:
+        "Owner control was denied; cross-identity request was not sent until the owner assignment is valid",
+      authenticationFailure: true,
+    };
+  if (response.status >= 300 && response.status < 400)
+    return {
+      detail:
+        "Owner control redirected; cross-identity request was not sent until the authentication flow is stable",
+      authenticationFailure: true,
+    };
+  if (!successful(response.status))
+    return {
+      detail: `Owner control returned HTTP ${response.status}; cross-identity request was not sent`,
+      authenticationFailure: response.status === 401 || response.status === 403,
+    };
+  return undefined;
+}
 
 export function compareEvidence(
   original: ResponseSample | undefined,
@@ -124,7 +180,7 @@ export function compareEvidence(
       ownership,
       indicators,
       "HIGH",
-      false,
+      cross.status === 401,
     );
   if (cross.status === 404 && successful(owner.status))
     return result(

@@ -390,6 +390,13 @@ export function analyzeMessage(
       rules,
     ),
   );
+  let scoredIndex = 0;
+  const assessedReferences = references.map((reference) => {
+    if (reference.source !== "REQUEST") return reference;
+    const scoredReference = scored[scoredIndex]?.reference ?? reference;
+    scoredIndex += 1;
+    return scoredReference;
+  });
   const eligible = scored.filter(
     (value) =>
       !value.ignored &&
@@ -405,7 +412,7 @@ export function analyzeMessage(
       endpoint,
       30,
       "LOW",
-      references,
+      assessedReferences,
       ["matched a scoped false-positive rule"],
       "SUPPRESSED",
       "Suppressed by a user rule",
@@ -432,7 +439,12 @@ export function analyzeMessage(
     score += 5;
     reasons.add("request body/action method");
   }
-  if (correlated(requestReferences, responseReferenceList)) {
+  if (
+    correlated(
+      eligible.map((value) => value.reference),
+      responseReferenceList,
+    )
+  ) {
     score += 10;
     reasons.add("request reference correlated with response");
   }
@@ -451,7 +463,7 @@ export function analyzeMessage(
     endpoint,
     score,
     priority,
-    references,
+    assessedReferences,
     [...reasons],
     disposition,
     disposition === "SUPPRESSED"
@@ -525,7 +537,13 @@ function buildAssessment(
   dispositionReason: string,
 ): DetectedAssessment {
   const selectors = references
-    .filter((reference) => reference.source === "REQUEST")
+    .filter(
+      (reference) =>
+        reference.source === "REQUEST" &&
+        !(
+          ["AUTH_CONTEXT", "PAGINATION", "TELEMETRY"] as ReferenceRole[]
+        ).includes(reference.role),
+    )
     .map(
       (reference) =>
         `${normalizeName(reference.name)}@${reference.location}:${reference.structuralPath}`,
@@ -986,12 +1004,7 @@ function correlated(
 ): boolean {
   for (const left of request) {
     for (const right of response) {
-      if (
-        (left.value !== "" && left.value === right.value) ||
-        (normalizeName(left.name) === normalizeName(right.name) &&
-          right.value !== "")
-      )
-        return true;
+      if (left.value !== "" && left.value === right.value) return true;
     }
   }
   return false;

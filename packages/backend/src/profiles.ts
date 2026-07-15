@@ -43,7 +43,8 @@ const SESSION_NAMES = new Set([
 type Substitution = {
   location: "QUERY" | "FORM" | "JSON";
   name: string;
-  path: string;
+  path: string[];
+  occurrence: number;
   value: string;
 };
 
@@ -59,7 +60,7 @@ export class ProfileManager {
     const headers: Record<string, string> = {};
     for (const [headerName, values] of Object.entries(request.getHeaders())) {
       if (!AUTH_HEADERS.has(headerName.toLowerCase())) continue;
-      headers[headerName] = values.join(", ");
+      headers[headerName] = joinHeaderValues(headerName, values);
     }
     const substitutions = captureSubstitutions(request);
     if (Object.keys(headers).length === 0)
@@ -67,6 +68,13 @@ export class ProfileManager {
         "No supported authentication headers were found in this request",
       );
     const fingerprint = profileFingerprint(headers, substitutions);
+    const duplicate = [...this.profiles.values()].find(
+      (value) => value.fingerprint === fingerprint,
+    );
+    if (duplicate !== undefined)
+      throw new Error(
+        `This identity is already captured as '${duplicate.name}'`,
+      );
     const profile: IdentityProfile = {
       id: uniqueId(fingerprint),
       name: name.trim() === "" ? "Profile" : name.trim().slice(0, 80),
@@ -75,8 +83,10 @@ export class ProfileManager {
       headerNames: Object.keys(headers).sort((left, right) =>
         left.localeCompare(right),
       ),
-      substitutionNames: substitutions.map(
-        (value) => `${value.location}:${value.name}`,
+      substitutionNames: substitutions.map((value) =>
+        value.location === "JSON"
+          ? `${value.location}:${formatPath(value.path)}`
+          : `${value.location}:${value.name}${value.occurrence === 0 ? "" : ` #${value.occurrence + 1}`}`,
       ),
       capturedAt: new Date().toISOString(),
       headers,
@@ -135,7 +145,7 @@ function captureSubstitutions(request: Request): Substitution[] {
   const output: Substitution[] = [];
   for (const value of parseEncoded(request.getQuery())) {
     if (SESSION_NAMES.has(normalize(value.name)))
-      output.push({ location: "QUERY", path: value.name, ...value });
+      output.push({ location: "QUERY", path: [], ...value });
   }
   const body = request.getBody()?.toText() ?? "";
   const contentType = (request.getHeader("Content-Type") ?? [])
@@ -144,7 +154,7 @@ function captureSubstitutions(request: Request): Substitution[] {
   if (contentType.includes("application/x-www-form-urlencoded")) {
     for (const value of parseEncoded(body)) {
       if (SESSION_NAMES.has(normalize(value.name)))
-        output.push({ location: "FORM", path: value.name, ...value });
+        output.push({ location: "FORM", path: [], ...value });
     }
   }
   if (contentType.includes("json")) collectJSONSubstitutions(body, output);
@@ -158,16 +168,16 @@ function collectJSONSubstitutions(body: string, output: Substitution[]): void {
   } catch {
     return;
   }
-  const walk = (value: unknown, path: string, depth: number): void => {
+  const walk = (value: unknown, path: string[], depth: number): void => {
     if (depth > 30 || output.length >= 50 || value === null) return;
     if (Array.isArray(value)) {
       for (let index = 0; index < value.length; index += 1)
-        walk(value[index], `${path}[${index}]`, depth + 1);
+        walk(value[index], [...path, String(index)], depth + 1);
       return;
     }
     if (typeof value !== "object") return;
     for (const [name, child] of Object.entries(value)) {
-      const nextPath = path === "" ? name : `${path}.${name}`;
+      const nextPath = [...path, name];
       if (
         SESSION_NAMES.has(normalize(name)) &&
         (typeof child === "string" || typeof child === "number")
@@ -176,12 +186,13 @@ function collectJSONSubstitutions(body: string, output: Substitution[]): void {
           location: "JSON",
           name,
           path: nextPath,
+          occurrence: 0,
           value: String(child),
         });
       else walk(child, nextPath, depth + 1);
     }
   };
-  walk(root, "", 0);
+  walk(root, [], 0);
 }
 
 function applySubstitutions(
@@ -191,14 +202,24 @@ function applySubstitutions(
   for (const substitution of substitutions) {
     if (substitution.location === "QUERY") {
       spec.setQuery(
-        replaceEncoded(spec.getQuery(), substitution.name, substitution.value),
+        replaceEncoded(
+          spec.getQuery(),
+          substitution.name,
+          substitution.value,
+          substitution.occurrence,
+        ),
       );
       continue;
     }
     const body = spec.getBody()?.toText() ?? "";
     if (substitution.location === "FORM")
       spec.setBody(
-        replaceEncoded(body, substitution.name, substitution.value),
+        replaceEncoded(
+          body,
+          substitution.name,
+          substitution.value,
+          substitution.occurrence,
+        ),
         {
           updateContentLength: true,
         },
@@ -210,21 +231,34 @@ function applySubstitutions(
   }
 }
 
-function replaceEncoded(raw: string, name: string, value: string): string {
+export function replaceEncoded(
+  raw: string,
+  name: string,
+  value: string,
+  occurrence = 0,
+): string {
+  let seen = 0;
   let replaced = false;
   const output = raw.split("&").map((pair) => {
     const separator = pair.indexOf("=");
     const rawName = separator < 0 ? pair : pair.slice(0, separator);
     if (!replaced && safeDecode(rawName.replace(/\+/g, " ")) === name) {
-      replaced = true;
-      return `${rawName}=${encodeURIComponent(value)}`;
+      if (seen === occurrence) {
+        replaced = true;
+        return `${rawName}=${encodeURIComponent(value)}`;
+      }
+      seen += 1;
     }
     return pair;
   });
   return replaced ? output.join("&") : raw;
 }
 
-function replaceJSON(raw: string, path: string, value: string): string {
+export function replaceJSON(
+  raw: string,
+  path: string[],
+  value: string,
+): string {
   let document: unknown;
   try {
     document = JSON.parse(raw) as unknown;
@@ -232,10 +266,7 @@ function replaceJSON(raw: string, path: string, value: string): string {
     return raw;
   }
   if (document === null || typeof document !== "object") return raw;
-  const segments = path
-    .replace(/\[(\d+)\]/g, ".$1")
-    .split(".")
-    .filter(Boolean);
+  const segments = path.filter((segment) => segment !== "");
   let current = document as Record<string, unknown>;
   for (const segment of segments.slice(0, -1)) {
     const next = current[segment];
@@ -248,17 +279,24 @@ function replaceJSON(raw: string, path: string, value: string): string {
   return JSON.stringify(document);
 }
 
-function parseEncoded(raw: string): Array<{ name: string; value: string }> {
+function parseEncoded(
+  raw: string,
+): Array<{ name: string; value: string; occurrence: number }> {
   if (raw === "") return [];
+  const occurrences = new Map<string, number>();
   return raw.split("&").map((pair) => {
     const separator = pair.indexOf("=");
+    const name = safeDecode(
+      (separator < 0 ? pair : pair.slice(0, separator)).replace(/\+/g, " "),
+    );
+    const occurrence = occurrences.get(name) ?? 0;
+    occurrences.set(name, occurrence + 1);
     return {
-      name: safeDecode(
-        (separator < 0 ? pair : pair.slice(0, separator)).replace(/\+/g, " "),
-      ),
+      name,
       value: safeDecode(
         (separator < 0 ? "" : pair.slice(separator + 1)).replace(/\+/g, " "),
       ),
+      occurrence,
     };
   });
 }
@@ -266,7 +304,10 @@ function parseEncoded(raw: string): Array<{ name: string; value: string }> {
 function profileMatches(profile: IdentityProfile, request: Request): boolean {
   if (Object.keys(profile.headers).length === 0) return false;
   for (const [headerName, expected] of Object.entries(profile.headers)) {
-    const actual = (request.getHeader(headerName) ?? []).join(", ");
+    const actual = joinHeaderValues(
+      headerName,
+      request.getHeader(headerName) ?? [],
+    );
     if (actual !== expected) return false;
   }
   return true;
@@ -285,7 +326,7 @@ function profileFingerprint(
       substitutions
         .map(
           (value) =>
-            `${value.location}:${normalize(value.name)}:${value.value}`,
+            `${value.location}:${normalize(value.name)}:${JSON.stringify(value.path)}:${value.occurrence}:${value.value}`,
         )
         .sort(),
     )
@@ -314,6 +355,17 @@ function toDTO(profile: IdentityProfile): ProfileDTO {
 
 function normalize(value: string): string {
   return value.trim().toLowerCase().replace(/-/g, "_");
+}
+
+export function joinHeaderValues(name: string, values: string[]): string {
+  return values.join(name.toLowerCase() === "cookie" ? "; " : ", ");
+}
+
+function formatPath(path: string[]): string {
+  return path
+    .map((segment) => (/^[0-9]+$/.test(segment) ? `[${segment}]` : segment))
+    .join(".")
+    .replace(/\.\[/g, "[");
 }
 
 function safeDecode(value: string): string {

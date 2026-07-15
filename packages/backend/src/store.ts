@@ -233,6 +233,15 @@ export class AssistantStore {
       projectId,
       assessment.fingerprint,
     );
+    const observationId = observationKey(input, assessment);
+    const observationExists = await database
+      .prepare(
+        "SELECT 1 AS found FROM observations WHERE project_id = ? AND id = ?",
+      )
+      .then((statement) =>
+        statement.get<{ found: number }>(projectId, observationId),
+      );
+    const occurrenceIncrement = observationExists === undefined ? 1 : 0;
     const now = new Date().toISOString();
     const references = assessment.references.map(toReferenceDTO);
     const review = await database
@@ -279,7 +288,10 @@ export class AssistantStore {
         now,
         now,
       );
-    } else {
+    } else if (
+      existing.review_status !== "CONFIRMED" &&
+      assessment.score >= existing.score
+    ) {
       const update = await database.prepare(`
         UPDATE candidates SET request_id = ?, response_id = ?, url = ?, host = ?, method = ?,
           response_status = ?, endpoint_template = ?, score = MAX(score, ?),
@@ -287,7 +299,7 @@ export class AssistantStore {
             WHEN priority = 'MEDIUM' OR ? = 'MEDIUM' THEN 'MEDIUM' ELSE 'LOW' END,
           disposition = CASE WHEN disposition = 'ACTIVE' OR ? = 'ACTIVE' THEN 'ACTIVE' ELSE 'SUPPRESSED' END,
           disposition_reason = ?, references_json = ?, reasons_json = ?,
-          occurrence_count = occurrence_count + 1, last_seen = ?
+          occurrence_count = occurrence_count + ?, last_seen = ?
         WHERE project_id = ? AND fingerprint = ?
       `);
       await update.run(
@@ -305,6 +317,18 @@ export class AssistantStore {
         assessment.dispositionReason,
         JSON.stringify(references),
         JSON.stringify(assessment.reasons),
+        occurrenceIncrement,
+        now,
+        projectId,
+        assessment.fingerprint,
+      );
+    } else {
+      const update = await database.prepare(`
+        UPDATE candidates SET occurrence_count = occurrence_count + ?, last_seen = ?
+        WHERE project_id = ? AND fingerprint = ?
+      `);
+      await update.run(
+        occurrenceIncrement,
         now,
         projectId,
         assessment.fingerprint,
@@ -368,6 +392,17 @@ export class AssistantStore {
     fingerprint: string,
     status: ReviewStatus,
   ): Promise<void> {
+    if (
+      !(
+        [
+          "NEEDS_REVIEW",
+          "REVIEWED",
+          "FALSE_POSITIVE",
+          "CONFIRMED",
+        ] as ReviewStatus[]
+      ).includes(status)
+    )
+      throw new Error("Invalid candidate review status");
     const database = this.requireDatabase();
     await database
       .prepare(
@@ -463,11 +498,12 @@ export class AssistantStore {
     now: string,
   ): Promise<void> {
     const database = this.requireDatabase();
-    const observationId = sha256(
-      `${input.requestId ?? ""}\n${assessment.fingerprint}`,
-    ).slice(0, 24);
+    const observationId = observationKey(input, assessment);
     const fingerprints = assessment.references
-      .filter((reference) => reference.source === "REQUEST")
+      .filter(
+        (reference) =>
+          reference.source === "REQUEST" && reference.role === "OBJECT",
+      )
       .map((reference) => sha256(reference.value).slice(0, 16));
     const insert = await database.prepare(`
       INSERT OR IGNORE INTO observations(
@@ -626,26 +662,38 @@ function parseStringArray(value: string): string[] {
 }
 
 function redactURL(url: string, assessment: DetectedAssessment): string {
-  const queryAt = url.indexOf("?");
-  let output = queryAt < 0 ? url : url.slice(0, queryAt);
+  const fragmentAt = url.indexOf("#");
+  const withoutFragment = fragmentAt < 0 ? url : url.slice(0, fragmentAt);
+  const queryAt = withoutFragment.indexOf("?");
+  let output =
+    queryAt < 0 ? withoutFragment : withoutFragment.slice(0, queryAt);
+  output = output.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/i, "$1");
   for (const reference of assessment.references) {
     if (
       reference.source === "REQUEST" &&
       reference.location === "PATH" &&
       reference.value !== ""
     )
-      output = output.replace(
-        `/${reference.value}`,
-        `/object-${sha256(reference.value).slice(0, 12)}`,
-      );
+      for (const value of [
+        reference.value,
+        encodeURIComponent(reference.value),
+      ])
+        output = output.replace(
+          `/${value}`,
+          `/object-${sha256(reference.value).slice(0, 12)}`,
+        );
   }
   if (queryAt >= 0) {
-    const names = assessment.references
-      .filter(
-        (reference) =>
-          reference.source === "REQUEST" && reference.location === "QUERY",
-      )
-      .map((reference) => encodeURIComponent(reference.name));
+    const names = [
+      ...new Set(
+        assessment.references
+          .filter(
+            (reference) =>
+              reference.source === "REQUEST" && reference.location === "QUERY",
+          )
+          .map((reference) => encodeURIComponent(reference.name)),
+      ),
+    ];
     output +=
       names.length === 0
         ? ""
@@ -654,9 +702,11 @@ function redactURL(url: string, assessment: DetectedAssessment): string {
   return output;
 }
 
-function normalizeSettings(settings: AssistantSettings): AssistantSettings {
+export function normalizeSettings(
+  settings: AssistantSettings,
+): AssistantSettings {
   return {
-    scopeOnly: settings.scopeOnly === true,
+    scopeOnly: settings.scopeOnly !== false,
     autoHistory: settings.autoHistory === true,
     maxRequestBytes: bounded(
       settings.maxRequestBytes,
@@ -679,9 +729,15 @@ function normalizeSettings(settings: AssistantSettings): AssistantSettings {
   };
 }
 
-function normalizeList(values: string[]): string[] {
+function normalizeList(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
   return [
-    ...new Set(values.map((value) => value.trim()).filter(Boolean)),
+    ...new Set(
+      values
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim().slice(0, 160))
+        .filter(Boolean),
+    ),
   ].slice(0, 500);
 }
 
@@ -702,4 +758,14 @@ function cloneSettings(settings: AssistantSettings): AssistantSettings {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function observationKey(
+  input: AnalyzerInput,
+  assessment: DetectedAssessment,
+): string {
+  return sha256(`${input.requestId ?? ""}\n${assessment.fingerprint}`).slice(
+    0,
+    24,
+  );
 }

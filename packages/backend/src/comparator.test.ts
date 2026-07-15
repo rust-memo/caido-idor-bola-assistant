@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { compareEvidence, dice, normalizeBody } from "./comparator";
+import {
+  classifyOwnerControl,
+  compareEvidence,
+  dice,
+  normalizeBody,
+} from "./comparator";
 import type { DetectedReference } from "./types";
 
 const reference: DetectedReference = {
@@ -75,6 +80,50 @@ describe("identity response comparison", () => {
       [],
     );
     expect(sessionFailure.authenticationFailure).toBe(true);
+
+    const unauthorized = compareEvidence(
+      undefined,
+      { status: 200, contentType: "application/json", body: "{}" },
+      {
+        status: 401,
+        contentType: "application/json",
+        body: '{"error":"unauthorized"}',
+      },
+      [reference],
+      [],
+    );
+    expect(unauthorized.authenticationFailure).toBe(true);
+  });
+
+  it("blocks a cross request when the owner control is not usable", () => {
+    expect(
+      classifyOwnerControl({
+        status: 302,
+        contentType: "text/html",
+        body: "",
+      }),
+    ).toMatchObject({ authenticationFailure: true });
+    expect(
+      classifyOwnerControl({
+        status: 200,
+        contentType: "text/html",
+        body: '<form action="/login"><input name="password"></form>',
+      })?.detail,
+    ).toContain("login page");
+    expect(
+      classifyOwnerControl({
+        status: 200,
+        contentType: "application/json",
+        body: '{"error":"access denied"}',
+      })?.detail,
+    ).toContain("Owner control was denied");
+    expect(
+      classifyOwnerControl({
+        status: 200,
+        contentType: "application/json",
+        body: '{"ok":true}',
+      }),
+    ).toBeUndefined();
   });
 
   it("downgrades suspicious access when the owner baseline is unstable", () => {

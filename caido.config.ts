@@ -10,7 +10,7 @@ export default defineConfig({
   name: "IDOR BOLA Assistant",
   description:
     "Evidence-driven passive IDOR/BOLA discovery and controlled identity comparison for Caido",
-  version: "1.0.1",
+  version: "1.1.0",
   author: {
     name: "rust-memo",
     email: "rust-memo@users.noreply.github.com",

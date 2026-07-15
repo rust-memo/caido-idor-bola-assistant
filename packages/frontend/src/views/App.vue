@@ -26,6 +26,37 @@ import { useSDK } from "@/plugins/sdk";
 
 type Tab = "candidates" | "profiles" | "testing" | "rules" | "settings";
 type MessageKind = "source" | "owner" | "cross";
+type SortOrder = "RISK" | "RECENT" | "OCCURRENCES" | "ENDPOINT";
+type ExportCandidate = {
+  priority: CandidateDTO["priority"];
+  score: number;
+  disposition: CandidateDTO["disposition"];
+  reviewStatus: ReviewStatus;
+  comparisonStatus: string;
+  comparisonConfidence: string;
+  method: string;
+  host: string;
+  endpointTemplate: string;
+  responseStatus: number;
+  references: Array<
+    Pick<
+      CandidateDTO["references"][number],
+      | "name"
+      | "location"
+      | "structuralPath"
+      | "source"
+      | "role"
+      | "shape"
+      | "sensitivity"
+      | "maskedValue"
+    >
+  >;
+  reasons: string[];
+  occurrences: number;
+  firstSeen: string;
+  lastSeen: string;
+  published: boolean;
+};
 
 const sdk = useSDK();
 const snapshot = ref<Snapshot>();
@@ -48,6 +79,7 @@ const dispositionFilter = ref("ACTIVE");
 const priorityFilter = ref("ALL");
 const reviewFilter = ref("ALL");
 const comparisonFilter = ref("ALL");
+const sortOrder = ref<SortOrder>("RISK");
 const focusedFingerprint = ref("");
 const selectedFingerprints = ref<string[]>([]);
 const selectedObservationId = ref("");
@@ -61,6 +93,7 @@ const requestHost = ref<HTMLElement>();
 const responseHost = ref<HTMLElement>();
 const requestEditor = sdk.ui.httpRequestEditor();
 const responseEditor = sdk.ui.httpResponseEditor();
+type MessageEditor = typeof requestEditor | typeof responseEditor;
 const profileName = ref("");
 const profileRole = ref("");
 const captureRequestId = ref("");
@@ -100,6 +133,10 @@ const maxResponseMb = computed({
 
 let snapshotListener: { stop: () => void } | undefined;
 let stateListener: { stop: () => void } | undefined;
+let focusListener: { stop: () => void } | undefined;
+let refreshQueued = false;
+let queuedSettingsRefresh = false;
+let messageSequence = 0;
 
 const candidates = computed(() => snapshot.value?.candidates ?? []);
 const observations = computed(() => snapshot.value?.observations ?? []);
@@ -122,6 +159,62 @@ const suspiciousCandidates = computed(
       (candidate) => candidate.comparisonStatus === "Suspicious access",
     ).length,
 );
+const highCandidates = computed(
+  () =>
+    candidates.value.filter(
+      (candidate) =>
+        candidate.disposition === "ACTIVE" && candidate.priority === "HIGH",
+    ).length,
+);
+const needsReviewCandidates = computed(
+  () =>
+    candidates.value.filter(
+      (candidate) =>
+        candidate.disposition === "ACTIVE" &&
+        candidate.reviewStatus === "NEEDS_REVIEW",
+    ).length,
+);
+const untestedCandidates = computed(
+  () =>
+    candidates.value.filter(
+      (candidate) =>
+        candidate.disposition === "ACTIVE" &&
+        candidate.comparisonStatus === "NOT_TESTED",
+    ).length,
+);
+const distinctHosts = computed(
+  () => new Set(candidates.value.map((candidate) => candidate.host)).size,
+);
+const assignedObservations = computed(
+  () =>
+    observations.value.filter(
+      (observation) => observation.ownerProfileId !== undefined,
+    ).length,
+);
+const comparedCandidates = computed(
+  () =>
+    candidates.value.filter(
+      (candidate) => candidate.comparisonStatus !== "NOT_TESTED",
+    ).length,
+);
+const reviewedComparisons = computed(
+  () =>
+    candidates.value.filter(
+      (candidate) =>
+        candidate.comparisonStatus !== "NOT_TESTED" &&
+        candidate.reviewStatus !== "NEEDS_REVIEW",
+    ).length,
+);
+const workflowProgress = computed(
+  () =>
+    [
+      activeCandidates.value > 0,
+      profiles.value.length >= 2,
+      assignedObservations.value > 0,
+      comparedCandidates.value > 0,
+      reviewedComparisons.value > 0,
+    ].filter(Boolean).length,
+);
 const focusedCandidate = computed(() =>
   candidates.value.find(
     (candidate) => candidate.fingerprint === focusedFingerprint.value,
@@ -140,8 +233,8 @@ const selectedObservation = computed(() =>
 );
 const ownerProfile = computed(() => profileById(ownerProfileId.value));
 const targetProfile = computed(() => profileById(targetProfileId.value));
-const filteredCandidates = computed(() =>
-  candidates.value.filter((candidate) => {
+const filteredCandidates = computed(() => {
+  const filtered = candidates.value.filter((candidate) => {
     const query = search.value.trim().toLowerCase();
     const haystack =
       `${candidate.host} ${candidate.method} ${candidate.endpointTemplate} ${candidate.url} ${candidate.reasons.join(" ")} ${candidate.references.map((reference) => `${reference.name} ${reference.location}`).join(" ")}`.toLowerCase();
@@ -156,8 +249,23 @@ const filteredCandidates = computed(() =>
         comparisonGroup(candidate) === comparisonFilter.value) &&
       (query.length === 0 || haystack.includes(query))
     );
-  }),
-);
+  });
+  return filtered.sort((left, right) => {
+    if (sortOrder.value === "RECENT")
+      return right.lastSeen.localeCompare(left.lastSeen);
+    if (sortOrder.value === "OCCURRENCES")
+      return right.occurrenceCount - left.occurrenceCount;
+    if (sortOrder.value === "ENDPOINT")
+      return `${left.host}${left.endpointTemplate}`.localeCompare(
+        `${right.host}${right.endpointTemplate}`,
+      );
+    return (
+      priorityWeight(right.priority) - priorityWeight(left.priority) ||
+      right.score - left.score ||
+      right.lastSeen.localeCompare(left.lastSeen)
+    );
+  });
+});
 const matrixCandidates = computed(() =>
   selectedFingerprints.value.flatMap((fingerprint) => {
     const candidate = candidates.value.find(
@@ -233,6 +341,9 @@ onMounted(async () => {
   stateListener = sdk.backend.onEvent("scan-state", (value) => {
     scanState.value = value;
   });
+  focusListener = sdk.backend.onEvent("focus-candidate", (fingerprint) => {
+    void focusCandidateFromCaido(fingerprint);
+  });
   await refresh();
 });
 
@@ -241,6 +352,7 @@ onUpdated(mountEditors);
 onUnmounted(() => {
   snapshotListener?.stop();
   stateListener?.stop();
+  focusListener?.stop();
 });
 
 function mountEditors() {
@@ -257,7 +369,11 @@ function mountEditors() {
 }
 
 async function refresh(updateSettings = true) {
-  if (loading.value) return;
+  if (loading.value) {
+    refreshQueued = true;
+    queuedSettingsRefresh ||= updateSettings;
+    return;
+  }
   loading.value = true;
   try {
     const current = await sdk.backend.getSnapshot();
@@ -270,6 +386,12 @@ async function refresh(updateSettings = true) {
     error.value = safeMessage(cause);
   } finally {
     loading.value = false;
+    if (refreshQueued) {
+      const shouldUpdateSettings = queuedSettingsRefresh;
+      refreshQueued = false;
+      queuedSettingsRefresh = false;
+      void refresh(shouldUpdateSettings);
+    }
   }
 }
 
@@ -327,6 +449,33 @@ async function focusCandidate(candidate: CandidateDTO) {
   await showMessage(candidate.requestId, "source");
 }
 
+async function focusCandidateFromCaido(fingerprint: string) {
+  activate("candidates");
+  let candidate = candidates.value.find(
+    (value) => value.fingerprint === fingerprint,
+  );
+  if (candidate === undefined) {
+    try {
+      const current = await sdk.backend.getSnapshot();
+      snapshot.value = current;
+      scanState.value = current.state;
+      normalizeSelections();
+      candidate = current.candidates.find(
+        (value) => value.fingerprint === fingerprint,
+      );
+    } catch (cause) {
+      error.value = safeMessage(cause);
+      return;
+    }
+  }
+  if (candidate === undefined) {
+    notice.value = "The selected request did not produce a visible candidate.";
+    return;
+  }
+  await focusCandidate(candidate);
+  notice.value = "Candidate opened from the selected Caido request.";
+}
+
 async function chooseObservation(observation: ObservationDTO) {
   selectedObservationId.value = observation.id;
   captureRequestId.value = observation.requestId;
@@ -337,9 +486,12 @@ async function chooseObservation(observation: ObservationDTO) {
 
 async function showMessage(requestId: string | undefined, kind: MessageKind) {
   if (requestId === undefined || requestId === "") return;
+  const sequence = ++messageSequence;
   try {
+    const details = await sdk.backend.getMessage(requestId);
+    if (sequence !== messageSequence) return;
     messageKind.value = kind;
-    message.value = await sdk.backend.getMessage(requestId);
+    message.value = details;
     setEditor(
       requestEditor,
       message.value?.request ?? "Request is no longer available in Caido.",
@@ -350,14 +502,12 @@ async function showMessage(requestId: string | undefined, kind: MessageKind) {
     );
     error.value = "";
   } catch (cause) {
+    if (sequence !== messageSequence) return;
     error.value = safeMessage(cause);
   }
 }
 
-function setEditor(
-  editor: ReturnType<typeof sdk.ui.httpRequestEditor>,
-  text: string,
-) {
+function setEditor(editor: MessageEditor, text: string) {
   const view = editor.getEditorView();
   view.dispatch({
     changes: { from: 0, to: view.state.doc.length, insert: text },
@@ -679,10 +829,10 @@ function exportCandidates(format: "json" | "csv") {
   anchor.download = `caido-idor-bola-candidates.${format}`;
   anchor.click();
   // eslint-disable-next-line compat/compat -- Caido desktop webview supports object URLs.
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-function exportableCandidate(candidate: CandidateDTO) {
+function exportableCandidate(candidate: CandidateDTO): ExportCandidate {
   return {
     priority: candidate.priority,
     score: candidate.score,
@@ -712,8 +862,8 @@ function exportableCandidate(candidate: CandidateDTO) {
   };
 }
 
-function toCSV(values: ReturnType<typeof exportableCandidate>[]): string {
-  const columns: Array<keyof ReturnType<typeof exportableCandidate>> = [
+function toCSV(values: ExportCandidate[]): string {
+  const columns: Array<keyof ExportCandidate> = [
     "priority",
     "score",
     "disposition",
@@ -736,7 +886,7 @@ function toCSV(values: ReturnType<typeof exportableCandidate>[]): string {
       typeof value === "string"
         ? value
         : (JSON.stringify(value) ?? String(value));
-    if (/^[=+@-]/.test(text)) text = `'${text}`;
+    if (/^[=+@-]/.test(text.trimStart())) text = `'${text}`;
     return `"${text.replace(/"/g, '""')}"`;
   };
   return `${columns.join(",")}\n${values.map((value) => columns.map((column) => escape(value[column])).join(",")).join("\n")}`;
@@ -765,6 +915,50 @@ function resultClass(status: string): string {
   if (status === "Suspicious access") return "suspicious";
   if (status === "Likely protected") return "protected";
   return "inconclusive";
+}
+
+function applyQuickView(view: "REVIEW" | "HIGH" | "UNTESTED" | "SUSPICIOUS") {
+  dispositionFilter.value = "ACTIVE";
+  priorityFilter.value = view === "HIGH" ? "HIGH" : "ALL";
+  reviewFilter.value = view === "REVIEW" ? "NEEDS_REVIEW" : "ALL";
+  comparisonFilter.value =
+    view === "UNTESTED"
+      ? "NOT_TESTED"
+      : view === "SUSPICIOUS"
+        ? "SUSPICIOUS"
+        : "ALL";
+  activeTab.value = "candidates";
+}
+
+function clearFilters() {
+  search.value = "";
+  dispositionFilter.value = "ACTIVE";
+  priorityFilter.value = "ALL";
+  reviewFilter.value = "ALL";
+  comparisonFilter.value = "ALL";
+  sortOrder.value = "RISK";
+}
+
+function captureFocusedIdentity() {
+  const requestId =
+    selectedObservation.value?.requestId ?? focusedCandidate.value?.requestId;
+  if (requestId !== undefined) captureRequestId.value = requestId;
+  activate("profiles");
+}
+
+function addFocusedToMatrix() {
+  const candidate = focusedCandidate.value;
+  if (candidate === undefined) return;
+  if (!selectedFingerprints.value.includes(candidate.fingerprint))
+    selectedFingerprints.value = [
+      ...selectedFingerprints.value,
+      candidate.fingerprint,
+    ];
+  activate("testing");
+}
+
+function priorityWeight(priority: CandidateDTO["priority"]): number {
+  return priority === "HIGH" ? 3 : priority === "MEDIUM" ? 2 : 1;
 }
 
 function splitList(value: string): string[] {
@@ -822,20 +1016,26 @@ function activate(tab: Tab) {
       </div>
     </header>
 
-    <div class="idor-state-line">{{ scanState.message }}</div>
-    <div v-if="error" class="idor-alert error">
+    <div class="idor-state-line" role="status">
+      <span class="idor-live-dot" :class="`phase-${scanState.phase}`" />
+      {{ scanState.message }}
+      <span class="idor-state-progress">Workflow {{ workflowProgress }}/5</span>
+    </div>
+    <div v-if="error" class="idor-alert error" role="alert">
       {{ error }}
       <button class="idor-link" @click="error = ''">dismiss</button>
     </div>
-    <div v-if="notice" class="idor-alert notice">
+    <div v-if="notice" class="idor-alert notice" role="status">
       {{ notice }}
       <button class="idor-link" @click="notice = ''">dismiss</button>
     </div>
 
-    <nav class="idor-tabs">
+    <nav class="idor-tabs" role="tablist" aria-label="Assistant workspace">
       <button
         class="idor-tab"
         :class="{ active: activeTab === 'candidates' }"
+        :aria-selected="activeTab === 'candidates'"
+        role="tab"
         @click="activate('candidates')"
       >
         Candidates ({{ activeCandidates }})
@@ -843,6 +1043,8 @@ function activate(tab: Tab) {
       <button
         class="idor-tab"
         :class="{ active: activeTab === 'profiles' }"
+        :aria-selected="activeTab === 'profiles'"
+        role="tab"
         @click="activate('profiles')"
       >
         Identities ({{ profiles.length }})
@@ -850,6 +1052,8 @@ function activate(tab: Tab) {
       <button
         class="idor-tab"
         :class="{ active: activeTab === 'testing' }"
+        :aria-selected="activeTab === 'testing'"
+        role="tab"
         @click="activate('testing')"
       >
         Test matrix ({{ selectedFingerprints.length }})
@@ -857,6 +1061,8 @@ function activate(tab: Tab) {
       <button
         class="idor-tab"
         :class="{ active: activeTab === 'rules' }"
+        :aria-selected="activeTab === 'rules'"
+        role="tab"
         @click="activate('rules')"
       >
         Rules ({{ rules.length }})
@@ -864,11 +1070,105 @@ function activate(tab: Tab) {
       <button
         class="idor-tab"
         :class="{ active: activeTab === 'settings' }"
+        :aria-selected="activeTab === 'settings'"
+        role="tab"
         @click="activate('settings')"
       >
         Settings
       </button>
     </nav>
+
+    <section class="idor-workflow" aria-label="Review workflow">
+      <div
+        class="idor-workflow-step"
+        :class="{ done: activeCandidates > 0, current: activeCandidates === 0 }"
+      >
+        <span>1</span>
+        <div>
+          <strong>Discover</strong><small>{{ activeCandidates }} leads</small>
+        </div>
+      </div>
+      <div
+        class="idor-workflow-step"
+        :class="{
+          done: profiles.length >= 2,
+          current: activeCandidates > 0 && profiles.length < 2,
+        }"
+      >
+        <span>2</span>
+        <div>
+          <strong>Capture identities</strong
+          ><small>{{ profiles.length }} profiles</small>
+        </div>
+      </div>
+      <div
+        class="idor-workflow-step"
+        :class="{
+          done: assignedObservations > 0,
+          current: profiles.length >= 2 && assignedObservations === 0,
+        }"
+      >
+        <span>3</span>
+        <div>
+          <strong>Assign owners</strong
+          ><small>{{ assignedObservations }} assigned</small>
+        </div>
+      </div>
+      <div
+        class="idor-workflow-step"
+        :class="{
+          done: comparedCandidates > 0,
+          current: assignedObservations > 0 && comparedCandidates === 0,
+        }"
+      >
+        <span>4</span>
+        <div>
+          <strong>Compare</strong><small>{{ comparedCandidates }} tested</small>
+        </div>
+      </div>
+      <div
+        class="idor-workflow-step"
+        :class="{
+          done: reviewedComparisons > 0,
+          current: comparedCandidates > 0 && reviewedComparisons === 0,
+        }"
+      >
+        <span>5</span>
+        <div>
+          <strong>Validate</strong
+          ><small>{{ reviewedComparisons }} reviewed</small>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="activeTab === 'candidates'" class="idor-dashboard">
+      <button class="idor-metric-card review" @click="applyQuickView('REVIEW')">
+        <span>Review queue</span><strong>{{ needsReviewCandidates }}</strong>
+        <small>active leads awaiting triage</small>
+      </button>
+      <button class="idor-metric-card high" @click="applyQuickView('HIGH')">
+        <span>High priority</span><strong>{{ highCandidates }}</strong>
+        <small>score 75 or above</small>
+      </button>
+      <button
+        class="idor-metric-card untested"
+        @click="applyQuickView('UNTESTED')"
+      >
+        <span>Untested</span><strong>{{ untestedCandidates }}</strong>
+        <small>needs identity comparison</small>
+      </button>
+      <button
+        class="idor-metric-card suspicious"
+        @click="applyQuickView('SUSPICIOUS')"
+      >
+        <span>Suspicious</span><strong>{{ suspiciousCandidates }}</strong>
+        <small>requires manual validation</small>
+      </button>
+      <div class="idor-metric-card context">
+        <span>Coverage</span><strong>{{ distinctHosts }}</strong>
+        <small>hosts · {{ candidates.length }} total candidates</small>
+      </div>
+    </section>
 
     <section v-if="activeTab === 'candidates'" class="idor-content">
       <div class="idor-toolbar">
@@ -918,6 +1218,17 @@ function activate(tab: Tab) {
           <option value="PROTECTED">Likely protected</option>
           <option value="INCONCLUSIVE">Inconclusive</option>
         </select>
+        <select
+          v-model="sortOrder"
+          class="idor-select"
+          aria-label="Sort candidates"
+        >
+          <option value="RISK">Sort: risk</option>
+          <option value="RECENT">Sort: recent</option>
+          <option value="OCCURRENCES">Sort: observations</option>
+          <option value="ENDPOINT">Sort: endpoint</option>
+        </select>
+        <button class="idor-button" @click="clearFilters">Reset filters</button>
         <button class="idor-button" @click="exportCandidates('json')">
           JSON
         </button>
@@ -927,6 +1238,10 @@ function activate(tab: Tab) {
       </div>
 
       <div class="idor-toolbar actions">
+        <span class="idor-result-count">
+          {{ filteredCandidates.length }} shown ·
+          {{ selectedFingerprints.length }} selected
+        </span>
         <button class="idor-button" @click="toggleVisibleSelection">
           Toggle visible GET/HEAD
         </button>
@@ -1013,7 +1328,15 @@ function activate(tab: Tab) {
                   {{ candidate.priority }}
                 </span>
               </td>
-              <td>{{ candidate.score }}</td>
+              <td>
+                <div
+                  class="idor-score"
+                  :title="`Evidence score ${candidate.score}/100`"
+                >
+                  <span>{{ candidate.score }}</span>
+                  <i><b :style="{ width: `${candidate.score}%` }" /></i>
+                </div>
+              </td>
               <td>{{ candidate.reviewStatus }}</td>
               <td>
                 <span
@@ -1064,6 +1387,20 @@ function activate(tab: Tab) {
           >
             {{ focusedCandidate.dispositionReason }}
           </span>
+          <div class="idor-detail-actions">
+            <button class="idor-button" @click="captureFocusedIdentity">
+              Capture identity
+            </button>
+            <button
+              class="idor-button primary"
+              :disabled="
+                !['GET', 'HEAD'].includes(focusedCandidate.method.toUpperCase())
+              "
+              @click="addFocusedToMatrix"
+            >
+              Add to test matrix
+            </button>
+          </div>
         </div>
 
         <div class="idor-detail-grid">
@@ -1090,16 +1427,28 @@ function activate(tab: Tab) {
               }}
             </p>
             <div class="idor-progress-pair">
-              <span
-                >Similarity
-                {{ Math.round(focusedCandidate.similarity * 100) }}%</span
-              >
-              <span
-                >Baseline
-                {{
-                  Math.round(focusedCandidate.baselineStability * 100)
-                }}%</span
-              >
+              <span>
+                <b
+                  >Similarity
+                  {{ Math.round(focusedCandidate.similarity * 100) }}%</b
+                >
+                <i
+                  ><em
+                    :style="{ width: `${focusedCandidate.similarity * 100}%` }"
+                /></i>
+              </span>
+              <span>
+                <b
+                  >Baseline
+                  {{ Math.round(focusedCandidate.baselineStability * 100) }}%</b
+                >
+                <i
+                  ><em
+                    :style="{
+                      width: `${focusedCandidate.baselineStability * 100}%`,
+                    }"
+                /></i>
+              </span>
             </div>
           </article>
         </div>
@@ -1171,6 +1520,13 @@ function activate(tab: Tab) {
             Cross identity
           </button>
         </div>
+        <div
+          v-if="message?.requestTruncated || message?.responseTruncated"
+          class="idor-warning idor-editor-warning"
+        >
+          The editor preview is limited to 8 MiB. Open the associated request in
+          Caido HTTP History to inspect the complete message.
+        </div>
         <div class="idor-split">
           <div class="idor-editor">
             <div class="idor-editor-title">Request · {{ messageKind }}</div>
@@ -1185,6 +1541,16 @@ function activate(tab: Tab) {
     </section>
 
     <section v-else-if="activeTab === 'profiles'" class="idor-content">
+      <div class="idor-section-heading">
+        <div>
+          <span>Step 2</span>
+          <h1>Identity vault</h1>
+        </div>
+        <p>
+          Capture at least two dedicated test identities before comparing
+          authorization.
+        </p>
+      </div>
       <div class="idor-warning">
         Profiles are held in memory only and are cleared when the Caido project
         changes or the plugin unloads. Authentication values are never returned
@@ -1256,6 +1622,16 @@ function activate(tab: Tab) {
     </section>
 
     <section v-else-if="activeTab === 'testing'" class="idor-content">
+      <div class="idor-section-heading">
+        <div>
+          <span>Steps 3–5</span>
+          <h1>Authorization test matrix</h1>
+        </div>
+        <p>
+          Assign the real owner, choose a distinct target, compare, then
+          validate manually.
+        </p>
+      </div>
       <div class="idor-warning strong">
         Controlled comparison is active testing. It sends only GET/HEAD
         requests, requires Caido Scope, never guesses identifiers, and uses only
@@ -1316,6 +1692,34 @@ function activate(tab: Tab) {
         >
           Stop comparison
         </button>
+      </div>
+
+      <div class="idor-readiness" :class="{ ready: comparisonReady }">
+        <strong>{{
+          comparisonReady ? "Focused case is ready" : "Comparison readiness"
+        }}</strong>
+        <span v-if="!focusedCandidate"
+          >Select a candidate from the matrix.</span
+        >
+        <span v-else-if="!selectedObservation"
+          >Select a source observation.</span
+        >
+        <span v-else-if="!ownerProfile"
+          >Assign and select the real owner identity.</span
+        >
+        <span v-else-if="!anonymousTarget && !targetProfile"
+          >Choose a distinct target identity or Anonymous.</span
+        >
+        <span
+          v-else-if="
+            !anonymousTarget &&
+            ownerProfile.fingerprint === targetProfile?.fingerprint
+          "
+          >Owner and target authentication fingerprints are identical.</span
+        >
+        <span v-else
+          >Scope and request budget will be enforced again by the backend.</span
+        >
       </div>
 
       <div v-if="selectedFingerprints.length" class="idor-table-wrap">
@@ -1484,6 +1888,13 @@ function activate(tab: Tab) {
     </section>
 
     <section v-else-if="activeTab === 'rules'" class="idor-content">
+      <div class="idor-section-heading">
+        <div>
+          <span>Tuning</span>
+          <h1>Candidate rules</h1>
+        </div>
+        <p>Keep local noise controls narrow, explainable, and reversible.</p>
+      </div>
       <div class="idor-warning">
         Rules contain selectors only—never raw object IDs, authentication
         values, or HTTP messages. Select a candidate first to add a narrow host
@@ -1562,6 +1973,15 @@ function activate(tab: Tab) {
     </section>
 
     <section v-else class="idor-content settings">
+      <div class="idor-section-heading">
+        <div>
+          <span>Configuration</span>
+          <h1>Safety and detection settings</h1>
+        </div>
+        <p>
+          Bound passive analysis and active comparisons for this Caido project.
+        </p>
+      </div>
       <div class="idor-warning">
         Scope-only mode is strongly recommended. Passive discovery sends no
         traffic. Saving settings rebuilds unconfirmed candidates from bounded

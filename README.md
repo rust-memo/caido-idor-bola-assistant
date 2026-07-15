@@ -9,30 +9,37 @@ Candidates and automated comparisons are review leads, not vulnerability verdict
 ## Features
 
 - Detects object references in paths, query/form fields, JSON, GraphQL, XML, multipart bodies, cookies, allowlisted headers, and bounded response bodies.
+- Presents a five-step Discover → Capture → Assign → Compare → Validate workflow with readiness guidance and triage metrics.
+- Provides quick review/high/untested/suspicious views, multiple sort modes, evidence-score bars, and responsive accessible controls.
+- Adds **Analyze with IDOR BOLA Assistant** to Caido request/response context menus and focuses a detected candidate directly.
 - Separates object references from authentication context, pagination, telemetry, and weak generic identifiers.
 - Keeps low-evidence signals under **Suppressed** and promotes repeated distinct evidence when appropriate.
 - Stores masked values and hashes in candidate metadata and exports instead of copying raw object identifiers into those records.
 - Captures multiple in-memory identity profiles from selected Caido requests, including supported authentication headers and session-bound CSRF/XSRF substitutions.
 - Associates each candidate with up to 20 distinct observations and lets reviewers explicitly assign an owner identity.
 - Runs one controlled owner-versus-target comparison or a bounded sequential read-only batch.
+- Validates the owner control first and skips the cross-identity request when the owner session is redirected, denied, rate limited, blocked, or otherwise unusable.
 - Compares status, content type, authentication barriers, redirects, normalized JSON/XML/HTML, object identity, and owner-baseline stability.
 - Stops batches on request-budget exhaustion, rate limiting, repeated authentication/session failures, cancellation, or scope violations.
 - Creates owner and cross-identity Replay sessions for mutation requests without sending either request.
 - Supports review states, reversible endpoint/host rules, filtered JSON/CSV metadata exports, and redacted Caido Findings after manual confirmation.
 - Persists candidates, observations, review states, rules, and settings per Caido project. Authentication profiles remain memory-only.
+- Applies captured CSRF/XSRF values to the exact repeated query/form occurrence or nested JSON path, including arrays and dotted keys.
+- Caps embedded request/response previews at 8 MiB while leaving complete messages available in Caido HTTP History.
 
 ## Requirements and build
 
-- Node.js 20 or newer.
-- pnpm 9.
-- A current Caido release compatible with SDK `0.46.x`.
+- Node.js 22 or newer.
+- pnpm 11.
+- A current Caido release compatible with SDK `0.57.x`.
 
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test
+pnpm test:coverage
 pnpm lint
 pnpm knip
+pnpm audit --audit-level high
 pnpm build
 ```
 
@@ -77,6 +84,7 @@ dist/plugin_package.zip
 ## Tabs
 
 - **Candidates** — filters, review states, masked reference evidence, source/control/cross messages, metadata export, and Finding publication.
+- **Candidates** also includes a live triage dashboard, workflow progress, quick views, sorting, and direct actions into identity capture or the test matrix.
 - **Identities** — capture and remove memory-only profiles.
 - **Test matrix** — assign owners, run explicit read-only comparisons, stop a batch, or prepare mutations in Replay.
 - **Rules** — add or remove host/endpoint `IGNORE` and `ALLOW` rules.

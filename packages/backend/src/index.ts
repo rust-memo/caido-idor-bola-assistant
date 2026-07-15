@@ -15,7 +15,7 @@ import type {
 } from "./types";
 
 const scanner = new IdorScanner();
-const assistantSDK = (sdk: SDK): AssistantSDK => sdk as unknown as AssistantSDK;
+const assistantSDK = (sdk: SDK): AssistantSDK => sdk;
 
 const getSnapshot = (sdk: SDK): Promise<Snapshot> =>
   scanner.getSnapshot(assistantSDK(sdk));
@@ -24,6 +24,11 @@ const getMessage = (
   requestId: string,
 ): Promise<MessageDetails | undefined> =>
   scanner.getMessage(assistantSDK(sdk), requestId);
+const analyzeRequest = (
+  sdk: SDK,
+  requestId: string,
+): Promise<string | undefined> =>
+  scanner.analyzeRequest(assistantSDK(sdk), requestId);
 const saveSettings = (
   sdk: SDK,
   settings: AssistantSettings,
@@ -82,6 +87,7 @@ const cancel = (sdk: SDK): void => scanner.cancel(assistantSDK(sdk));
 export type API = DefineAPI<{
   getSnapshot: typeof getSnapshot;
   getMessage: typeof getMessage;
+  analyzeRequest: typeof analyzeRequest;
   saveSettings: typeof saveSettings;
   setStatus: typeof setStatus;
   captureProfile: typeof captureProfile;
@@ -104,11 +110,13 @@ export type API = DefineAPI<{
 export type BackendEvents = DefineEvents<{
   snapshot: (snapshot: Snapshot) => void;
   "scan-state": (state: ScanState) => void;
+  "focus-candidate": (fingerprint: string) => void;
 }>;
 
 export function init(sdk: SDK<API, BackendEvents>) {
   sdk.api.register("getSnapshot", getSnapshot);
   sdk.api.register("getMessage", getMessage);
+  sdk.api.register("analyzeRequest", analyzeRequest);
   sdk.api.register("saveSettings", saveSettings);
   sdk.api.register("setStatus", setStatus);
   sdk.api.register("captureProfile", captureProfile);
