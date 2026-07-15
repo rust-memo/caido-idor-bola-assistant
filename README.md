@@ -49,9 +49,17 @@ The loadable package is created at:
 dist/plugin_package.zip
 ```
 
+Official GitHub releases include `plugin_package.zip.sig`. Verify the Ed25519
+signature with the repository's `PUBLIC_KEY.pem` before installing:
+
+```bash
+openssl pkeyutl -verify -pubin -inkey PUBLIC_KEY.pem \
+  -sigfile plugin_package.zip.sig -rawin -in plugin_package.zip
+```
+
 ## Install
 
-1. Build the plugin or obtain `plugin_package.zip` from a trusted release.
+1. Build the plugin or obtain and verify `plugin_package.zip` from a trusted release.
 2. Open Caido's plugin installation screen and load the ZIP package.
 3. Add only authorized targets to Caido Scope.
 4. Open **IDOR BOLA Assistant** from the sidebar.

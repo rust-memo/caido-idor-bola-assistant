@@ -43,12 +43,13 @@ jobs:
         working-directory: dist
         run: |
           if [[ -z "${{ secrets.PRIVATE_KEY }}" ]]; then
-            echo "Set an ed25519 key as PRIVATE_KEY in GitHub Action secret to sign."
-          else
-            echo "${{ secrets.PRIVATE_KEY }}" > private_key.pem
-            openssl pkeyutl -sign -inkey private_key.pem -out plugin_package.zip.sig -rawin -in plugin_package.zip
-            rm private_key.pem
+            echo "PRIVATE_KEY is required for signed releases."
+            exit 1
           fi
+          printf '%s\n' "${{ secrets.PRIVATE_KEY }}" > private_key.pem
+          openssl pkeyutl -sign -inkey private_key.pem -out plugin_package.zip.sig -rawin -in plugin_package.zip
+          rm private_key.pem
+          test -s plugin_package.zip.sig
 
       - name: Check version
         id: meta

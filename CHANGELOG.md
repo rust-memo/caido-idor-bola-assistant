@@ -11,6 +11,7 @@
 - Exact CSRF/XSRF substitution for repeated query/form fields and nested JSON arrays or keys containing dots.
 - An 8 MiB editor preview limit with a clear fallback to the complete message in Caido HTTP History.
 - Coverage reporting and downloadable build artifacts in the GitHub validation workflow.
+- Repository-specific Ed25519 release signing with a committed public verification key.
 
 ### Fixed
 
