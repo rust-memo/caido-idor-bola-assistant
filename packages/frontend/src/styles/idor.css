@@ -1,7 +1,7 @@
 #plugin--caido-idor-bola-assistant {
   height: 100%;
   min-height: 0;
-  color: var(--p-text-color);
+  color: rgba(255, 255, 255, 0.88);
   background:
     radial-gradient(circle at 8% -10%, color-mix(in srgb, var(--p-primary-color), transparent 88%), transparent 32rem),
     var(--p-surface-950);
@@ -9,10 +9,29 @@
 }
 
 .idor-shell {
+  --idor-text: rgba(255, 255, 255, 0.88);
+  --idor-muted: hsl(var(--c-surface-400, 0deg 0% 57%));
+  --p-primary-color: var(--p-primary-400);
+  --p-primary-contrast-color: var(--p-surface-900);
+  --p-primary-hover-color: hsl(var(--c-secondary-300));
+  --p-primary-active-color: hsl(var(--c-secondary-200));
+  --p-content-border-color: var(--p-surface-700);
+  --p-content-hover-background: var(--p-surface-800);
+  --p-content-hover-color: var(--idor-text);
+  --p-highlight-background: color-mix(in srgb, hsl(var(--c-secondary-400)), transparent 84%);
+  --p-highlight-color: var(--idor-text);
+  --p-highlight-focus-background: color-mix(in srgb, hsl(var(--c-secondary-400)), transparent 76%);
+  --p-highlight-focus-color: var(--idor-text);
+  --p-text-color: var(--idor-text);
+  --p-text-hover-color: rgba(255, 255, 255, 0.96);
+  --p-text-muted-color: var(--idor-muted);
+  --p-text-hover-muted-color: var(--p-surface-300);
   display: flex;
   min-height: 100%;
   flex-direction: column;
+  color: var(--idor-text);
   background: transparent;
+  color-scheme: dark;
 }
 
 .idor-header {
@@ -229,6 +248,17 @@
   min-height: 7rem;
   padding: 0.55rem;
   resize: vertical;
+}
+
+.idor-input::placeholder,
+.idor-textarea::placeholder {
+  color: var(--idor-muted);
+  opacity: 1;
+}
+
+.idor-select option {
+  color: var(--idor-text);
+  background: var(--p-surface-900);
 }
 
 .idor-input:focus,
