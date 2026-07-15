@@ -12,7 +12,6 @@ concurrency:
 
 env:
   CAIDO_NODE_VERSION: 20
-  CAIDO_PNPM_VERSION: 9
 
 jobs:
   typecheck:
@@ -22,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -30,9 +29,7 @@ jobs:
           node-version: ${{ env.CAIDO_NODE_VERSION }}
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v3.0.0
-        with:
-          version: ${{ env.CAIDO_PNPM_VERSION }}
+        uses: pnpm/action-setup@v4.1.0
 
       - name: Install dependencies
         run: pnpm install
@@ -55,8 +52,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4.1.0
-        with:
-          version: ${{ env.CAIDO_PNPM_VERSION }}
 
       - name: Install dependencies
         run: pnpm install
@@ -79,8 +74,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4.1.0
-        with:
-          version: ${{ env.CAIDO_PNPM_VERSION }}
 
       - name: Install dependencies
         run: pnpm install
@@ -104,8 +97,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4.1.0
-        with:
-          version: ${{ env.CAIDO_PNPM_VERSION }}
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
